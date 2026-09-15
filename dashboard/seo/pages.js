@@ -1221,7 +1221,7 @@ const gtaClips = () => ({
   tldr: [
     'A GTA 5 stream is four to eight hours of 16:9 gameplay with a webcam box in one corner. OpenShorts reads the whole VOD, picks the moments worth posting out of what was said, and reframes each one so the gameplay keeps its full width and the facecam is enlarged underneath it instead of cropped away.',
     'Length is what makes this expensive everywhere else. Tools in this category bill one credit per minute of source you import, so a single eight-hour stream is 480 minutes: more than the 300 minutes a $29/month Opus Clip Pro plan includes (checked 2026-07-27). Self-hosted OpenShorts has no meter at all; the hosted edition starts at $12/month.',
-    'One honest limit up front: moments are scored from the transcript, so the stream has to have talking in it. Roleplay dialogue, heist banter and commentary all work. Silent gameplay gives the picker nothing to read.',
+    'Gameplay with no commentary is handled too, and it is where most clippers stop: when a stream has no usable speech OpenShorts switches by itself to a vision pass where Gemini watches the footage and picks the moments, instead of failing on an empty transcript. The switch is automatic, with one practical ceiling noted below.',
   ],
   body: `
 <h2>Why GTA clips break a normal auto-clipper</h2>
@@ -1290,14 +1290,30 @@ week is importing roughly 6,000 minutes a month. Gaming is the category where
 per-minute pricing and the actual shape of the content are furthest apart.</p>
 ${pricingParagraph}
 
-<h2>What it will not do: silent gameplay</h2>
-<p>The moment picker reads the transcript. That is a deliberate trade (it is
-also why an eight-hour source costs about the same to analyse as an eight-minute
-one) and it has a hard consequence: a stream with no talking has nothing for it
-to score. Roleplay dialogue, commentary, party voice chat and reaction all work.
-A silent grind with only game audio does not, and no amount of tuning fixes it,
-because the signal is simply not there. If that is your footage, a kill-feed or
-audio-peak detector is the right shape of tool and OpenShorts is not it.</p>
+<h2>What happens when nobody is talking</h2>
+<p>Most of this page assumes commentary, because the default picker reads the
+transcript: roleplay dialogue, heist banter and party voice chat are exactly
+what it is good at, and reading words rather than frames is why an eight-hour
+source costs about the same to analyse as an eight-minute one. A silent grind
+has no transcript to read, so OpenShorts does not use one.</p>
+<p>It switches paths on its own, and it does not need to be told to. Footage
+with no audio track at all, and footage whose transcript comes back under 8
+words or under 5 words per minute (music-only streams, a mic that was muted the
+whole session), both trip the same branch: the video itself goes to Gemini,
+which watches it and returns the same 3 to 15 moments in the same 15 to 60
+second band as the transcript path. Everything downstream is identical, layouts
+and inset detection included. The one difference is that the clips come out
+without captions, which is correct rather than a bug: there is no speech to
+caption.</p>
+<p class="note"><span class="label">The one ceiling worth knowing</span>
+This is the single stage that sends Gemini the footage instead of a handful of
+frames, and Gemini bills video at roughly 300 tokens per second. An hour of
+gameplay is around 1.08 million tokens, which does not fit a 1 million token
+context window, and there is no length guard in front of it: a silent eight-hour
+VOD will fail at the model rather than politely. So for silent footage, hand it
+the session or the segment you care about rather than the full stream. With
+commentary the ceiling does not exist, because the transcript path never uploads
+the video at all.</p>
 
 <h2>Whose footage can you clip?</h2>
 <p>Yours, and footage you have permission for. Your own streams and recordings,
@@ -1326,7 +1342,7 @@ ${faqBlock([
   },
   {
     q: 'Does it work on gameplay with no commentary?',
-    a: 'No. Moments are picked from the transcript, so a stream with no talking gives the picker nothing to score. Roleplay dialogue, commentary and party chat all work; a silent grind does not.',
+    a: 'Yes, and it switches by itself. Footage with no audio track, or whose transcript comes back under 8 words or under 5 words per minute, goes down a vision pass instead: Gemini watches the footage and returns the same 3 to 15 moments, with the same layouts and inset detection after it. The clips come out without captions, since there is no speech to caption. The practical limit is length, because that pass sends Gemini the video rather than a few frames: give it the session you care about, not a silent eight-hour VOD.',
   },
   {
     q: 'Is it free for streamers?',
@@ -1337,6 +1353,7 @@ ${faqBlock([
 ${sources([
   'Opus Clip tier minutes and prices checked 2026-07-27 on their public pricing page.',
   'Inset detection and layout accuracy figures are our own measurements on a 48-video internal corpus, 2026-08.',
+  'Silent-footage thresholds (8 words, 5 words per minute) and the vision fallback are in <code>main.py</code>; Gemini video token rates from Google\'s published pricing.',
   `Inset, WIDE and screencast layout implementations in the project source at <a href="${SITE.repo}" rel="noopener">github.com/mutonby/openshorts</a>.`,
 ])}
 `,
@@ -1355,7 +1372,7 @@ ${sources([
     },
     {
       q: 'Does it work on gameplay with no commentary?',
-      a: 'No. Moments are picked from the transcript, so a stream with no talking gives it nothing to score.',
+      a: 'Yes. When a video has no audio track, or under 8 words of speech, OpenShorts switches automatically to a vision pass where Gemini watches the footage and picks the same 3 to 15 moments. Those clips have no captions, because there is no speech to caption.',
     },
   ],
   /* HowTo is emitted alongside the Article because the primary query here is a
