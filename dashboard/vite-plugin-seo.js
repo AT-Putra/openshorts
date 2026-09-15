@@ -22,8 +22,12 @@ import { renderPage } from './seo/render.js'
 import { LANDING_FALLBACK } from './seo/landing-fallback.js'
 
 const sitemapXml = (pages) => {
-  const url = (loc, priority, changefreq) =>
-    `  <url>\n    <loc>${loc}</loc>\n    <lastmod>${SITE.updated}</lastmod>\n` +
+  // lastmod is per page, not sitewide: a page carries its own `updated` and only
+  // falls back to SITE.updated when it has none. Stamping every URL with today's
+  // date because one page changed is the fastest way to have a crawler stop
+  // trusting the field at all.
+  const url = (loc, priority, changefreq, lastmod = SITE.updated) =>
+    `  <url>\n    <loc>${loc}</loc>\n    <lastmod>${lastmod}</lastmod>\n` +
     `    <changefreq>${changefreq}</changefreq>\n    <priority>${priority}</priority>\n  </url>`
 
   return (
@@ -31,7 +35,7 @@ const sitemapXml = (pages) => {
     `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
     [
       url(`${SITE.url}/`, '1.0', 'weekly'),
-      ...pages.map((p) => url(`${SITE.url}${p.path}`, '0.8', 'monthly')),
+      ...pages.map((p) => url(`${SITE.url}${p.path}`, '0.8', 'monthly', p.updated || SITE.updated)),
     ].join('\n') +
     `\n</urlset>\n`
   )

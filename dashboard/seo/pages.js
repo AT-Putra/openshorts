@@ -1200,6 +1200,208 @@ ${sources([
   ],
 })
 
+/* Gaming is the biggest clip-producing category on the vertical platforms and
+ * the worst served by this class of tool: the source is a multi-hour VOD, the
+ * gameplay fills the whole 16:9 frame, and the only face on screen is a webcam
+ * box in a corner that a centre crop throws away. This page is built on the two
+ * code paths that actually address that (camera_inset and WIDE) plus the one
+ * arithmetic fact that decides the category: per-minute credits against a
+ * source measured in hours. It is deliberately not a re-telling of the generic
+ * pipeline with the word "GTA" pasted over it.
+ */
+const gtaClips = () => ({
+  path: '/gta-5-clips',
+  title: 'GTA 5 Clips: Turn Stream VODs Into Vertical Shorts | OpenShorts',
+  description:
+    'Turn GTA 5 and GTA RP stream VODs into TikToks, Reels and Shorts. Keeps the gameplay full width and enlarges your facecam instead of cropping it out. Free self-hosted, no per-minute meter.',
+  h1: 'Turn GTA 5 and GTA RP streams into vertical clips',
+  breadcrumb: [{ name: 'GTA 5 clips' }],
+  published: '2026-09-15',
+  updated: '2026-09-15',
+  tldr: [
+    'A GTA 5 stream is four to eight hours of 16:9 gameplay with a webcam box in one corner. OpenShorts reads the whole VOD, picks the moments worth posting out of what was said, and reframes each one so the gameplay keeps its full width and the facecam is enlarged underneath it instead of cropped away.',
+    'Length is what makes this expensive everywhere else. Tools in this category bill one credit per minute of source you import, so a single eight-hour stream is 480 minutes: more than the 300 minutes a $29/month Opus Clip Pro plan includes (checked 2026-07-27). Self-hosted OpenShorts has no meter at all; the hosted edition starts at $12/month.',
+    'One honest limit up front: moments are scored from the transcript, so the stream has to have talking in it. Roleplay dialogue, heist banter and commentary all work. Silent gameplay gives the picker nothing to read.',
+  ],
+  body: `
+<h2>Why GTA clips break a normal auto-clipper</h2>
+<p>Every auto-clipper in this category was designed around a talking head: one
+person, centred, filling a 16:9 frame that crops cleanly to 9:16. A GTA stream
+is the opposite on all three counts. The frame is gameplay, so a centre crop
+keeps Los Santos and drops the minimap, the kill feed and the chat. The only
+face is a small webcam box pinned to a corner, so a face tracker either ignores
+it or, worse, latches onto a pedestrian NPC. And the source is not eight minutes
+long, it is eight hours. Those are three different problems and each one has its
+own answer below.</p>
+
+<h2>How the webcam inset layout works</h2>
+<p>The OBS layout almost every GTA streamer uses, gameplay full screen with the
+camera composited into a corner, is a single video file with two things in it.
+OpenShorts detects that geometrically rather than asking a model: it looks for a
+subject that is <strong>small</strong>, <strong>off centre horizontally</strong>
+and <strong>still between samples</strong>. All three filters are needed. A
+talking head sitting high in frame is still centred, so size alone is not
+enough, and a real person moves 300 pixels between samples where a pinned
+webcam box moves three to eleven. On our 48-video test corpus that detector
+found all five clips that had a webcam inset, with no false positives.</p>
+<p>When it fires, the clip renders as INSET: the gameplay across the full width
+at the top of the 9:16 frame, and the webcam box cropped out and blown up to
+fill the bottom. You get the play and the reaction to the play, both legible on
+a phone, instead of one of them at 100 pixels wide.</p>
+<div class="note"><span class="label">Why not just ask the model</span>
+<p>Offered as a fourth choice alongside the other layouts, Gemini answered
+"screencast" on all five clips that had an inset, in two separate passes, and
+overall layout accuracy fell from 92% to 83-85%. The geometry is a better judge
+than the model here, so the detector runs after the layout decision rather than
+inside it.</p></div>
+
+<h2>When the gameplay itself is the point</h2>
+<p>Not every moment has a face worth showing. A chase, a heist finale or a
+five-car pileup means what it means across the whole width of the frame, and
+cropping to a vertical column deletes the half that explains it. OpenShorts
+measures how wide the meaningful content is and routes on that: content spanning
+more than 85% of the frame renders as WIDE, which keeps the full width intact
+over a blurred backdrop rather than side-cropping it. Content that leaves room
+beside it, a GTA RP scene playing out on one side of the screen for instance,
+gets stacked over the presenter instead.</p>
+<p>Width is the gate rather than coverage because width is what survives
+measurement. A corner kill notification and a full-screen map both look "busy";
+only one of them spans the frame and cannot be cropped.</p>
+
+<h2>How to clip a GTA 5 stream, step by step</h2>
+<ol>
+<li>Paste the VOD link (a Twitch export, a YouTube upload) or drop the local recording in. Multi-hour sources are the normal case here, not the edge case.</li>
+<li>faster-whisper transcribes with word-level timestamps and PySceneDetect maps the cuts, which is what keeps a clip from opening mid-explosion.</li>
+<li>Gemini reads the transcript against those boundaries and returns the 3 to 15 segments that stand alone best, 15 to 60 seconds each.</li>
+<li>Leave the vertical layout on <strong>auto</strong> (dashboard, advanced options; <code>"layouts": ["auto"]</code> on the API). Auto is what enables the screen layouts, and the inset detector is chained behind them.</li>
+<li>Subtitles are burned in from the word-level transcript. On gaming feeds this is not optional polish: the clips autoplay muted.</li>
+<li>Download the clips, or post them straight to TikTok, YouTube Shorts and Instagram Reels from the dashboard or the API.</li>
+</ol>
+
+<h2>What an eight-hour stream costs to clip</h2>
+<p class="checked">Competitor terms checked 2026-07-27 on public pricing pages.</p>
+<p>This is the arithmetic that decides the category, and it is worth doing
+before you pick a tool. Credit-metered clippers bill one credit per minute of
+the video you <em>import</em>, not per clip you keep. One eight-hour GTA RP
+stream is 480 minutes. Opus Clip's free tier is 60 minutes a month, Starter is
+150 minutes at $15/month and Pro is 300 minutes at $29/month, so a single
+stream does not fit in any of them, and a streamer who goes live three times a
+week is importing roughly 6,000 minutes a month. Gaming is the category where
+per-minute pricing and the actual shape of the content are furthest apart.</p>
+${pricingParagraph}
+
+<h2>What it will not do: silent gameplay</h2>
+<p>The moment picker reads the transcript. That is a deliberate trade (it is
+also why an eight-hour source costs about the same to analyse as an eight-minute
+one) and it has a hard consequence: a stream with no talking has nothing for it
+to score. Roleplay dialogue, commentary, party voice chat and reaction all work.
+A silent grind with only game audio does not, and no amount of tuning fixes it,
+because the signal is simply not there. If that is your footage, a kill-feed or
+audio-peak detector is the right shape of tool and OpenShorts is not it.</p>
+
+<h2>Whose footage can you clip?</h2>
+<p>Yours, and footage you have permission for. Your own streams and recordings,
+your RP server co-stars' VODs with their blessing, clients' channels you manage.
+Two separate rights questions apply to GTA clips and they have different
+answers: the <strong>recording</strong> belongs to whoever streamed it, and the
+<strong>game footage</strong> is covered by Rockstar Games' own policy on fan
+videos, which has historically permitted gameplay videos monetised through the
+platforms' standard ad programs. That is their policy and it can change, so
+check the current version rather than taking this page's word for it. Reuploading
+another streamer's clips without permission is the one case that is clearly not
+fine, and the platforms strike it.</p>
+
+${faqBlock([
+  {
+    q: 'How do I make GTA 5 clips for TikTok?',
+    a: 'Paste the stream VOD link into OpenShorts with the vertical layout set to auto. It transcribes the whole recording, has Gemini pick the 3 to 15 strongest 15 to 60 second moments out of what was said, reframes each one to 9:16 keeping the gameplay full width with your facecam enlarged below it, and burns in word-level subtitles. Clips download or post straight to TikTok, Reels and Shorts.',
+  },
+  {
+    q: 'Can it handle a whole eight-hour GTA RP stream?',
+    a: 'Yes, long sources are the design case. Moment scoring reads the transcript rather than the raw video, so an eight-hour VOD does not degrade selection the way it degrades a frame-by-frame approach. Processing time scales with length: the GPU-backed hosted edition clips about 8 minutes of source in 50 seconds, and self-hosted on CPU it is roughly 5 to 8 minutes of processing per 8 minutes of source.',
+  },
+  {
+    q: 'Does it keep my facecam in the clip?',
+    a: 'Yes, when the layout picker is on auto. A webcam box composited into a corner is detected geometrically (small, off centre horizontally, static between samples) and the clip renders as INSET: gameplay at full width on top, the webcam cropped out and enlarged underneath, so both are legible on a phone.',
+  },
+  {
+    q: 'Does it work on gameplay with no commentary?',
+    a: 'No. Moments are picked from the transcript, so a stream with no talking gives the picker nothing to score. Roleplay dialogue, commentary and party chat all work; a silent grind does not.',
+  },
+  {
+    q: 'Is it free for streamers?',
+    a: 'Self-hosted OpenShorts is free and open source under MIT with no per-minute meter, which is the edition that makes sense when your sources are measured in hours: run it with Docker and bring your own Gemini API key. OpenShorts Cloud covers 20 minutes a month free with a watermark, and paid hosted plans start at $12/month.',
+  },
+])}
+
+${sources([
+  'Opus Clip tier minutes and prices checked 2026-07-27 on their public pricing page.',
+  'Inset detection and layout accuracy figures are our own measurements on a 48-video internal corpus, 2026-08.',
+  `Inset, WIDE and screencast layout implementations in the project source at <a href="${SITE.repo}" rel="noopener">github.com/mutonby/openshorts</a>.`,
+])}
+`,
+  faq: [
+    {
+      q: 'How do I make GTA 5 clips for TikTok?',
+      a: 'Paste the stream VOD into OpenShorts with the vertical layout on auto: it transcribes the recording, picks the 3 to 15 strongest 15 to 60 second moments, reframes each to 9:16 keeping the gameplay full width with the facecam enlarged below, and burns in subtitles.',
+    },
+    {
+      q: 'Can it handle a whole eight-hour GTA RP stream?',
+      a: 'Yes. Moment scoring reads the transcript rather than the raw video, so multi-hour VODs are the design case. Self-hosted there is no per-minute meter, which matters when one stream is 480 minutes of source.',
+    },
+    {
+      q: 'Does it keep my facecam in the clip?',
+      a: 'Yes. A webcam box in a corner is detected geometrically and the clip renders with the gameplay full width on top and the facecam cropped out and enlarged underneath.',
+    },
+    {
+      q: 'Does it work on gameplay with no commentary?',
+      a: 'No. Moments are picked from the transcript, so a stream with no talking gives it nothing to score.',
+    },
+  ],
+  /* HowTo is emitted alongside the Article because the primary query here is a
+   * procedure ("how to make GTA 5 clips"), and a procedure stated as steps in
+   * the graph is the form an engine can lift whole. */
+  extraNodes: [
+    {
+      '@type': 'HowTo',
+      '@id': `${SITE.url}/gta-5-clips#howto`,
+      name: 'How to turn a GTA 5 stream into vertical clips',
+      description:
+        'Turn a multi-hour GTA 5 or GTA RP stream VOD into vertical 9:16 clips for TikTok, YouTube Shorts and Instagram Reels, keeping the gameplay full width and the facecam visible.',
+      totalTime: 'PT15M',
+      supply: [{ '@type': 'HowToSupply', name: 'A GTA 5 stream VOD (link or local file) you have the rights to' }],
+      tool: [{ '@type': 'HowToTool', name: 'OpenShorts (self-hosted with Docker, or OpenShorts Cloud)' }],
+      step: [
+        {
+          '@type': 'HowToStep',
+          name: 'Add the VOD',
+          text: 'Paste the stream link or upload the local recording. Multi-hour sources are supported.',
+        },
+        {
+          '@type': 'HowToStep',
+          name: 'Set the vertical layout to auto',
+          text: 'In advanced options choose the auto vertical layout, or send "layouts": ["auto"] on the API. Auto enables the screen layouts, and webcam inset detection is chained behind them.',
+        },
+        {
+          '@type': 'HowToStep',
+          name: 'Let the AI pick the moments',
+          text: 'The VOD is transcribed with word-level timestamps and scanned for scene cuts, then Gemini scores the transcript and returns the 3 to 15 strongest segments of 15 to 60 seconds.',
+        },
+        {
+          '@type': 'HowToStep',
+          name: 'Review the reframed clips',
+          text: 'Gameplay with a corner webcam renders as gameplay full width on top and the enlarged facecam below; full-frame action keeps its full width over a blurred backdrop. Subtitles are burned in from the word-level transcript.',
+        },
+        {
+          '@type': 'HowToStep',
+          name: 'Publish',
+          text: 'Download the clips or post them directly to TikTok, YouTube Shorts and Instagram Reels from the dashboard or the API.',
+        },
+      ],
+    },
+  ],
+})
+
 export function buildPages() {
   // Ring order matters: relatedFor links each page to the next three, so
   // neighbours are chosen to be topically adjacent.
@@ -1211,6 +1413,7 @@ export function buildPages() {
     openSourceClipper(),
     openSourceVideoGenerator(),
     howItWorks(),
+    gtaClips(),
     podcastToShorts(),
     youtubeConverter(),
     mcpAgentsPage(),
@@ -1235,6 +1438,7 @@ export function relatedFor(page, all) {
     '/how-openshorts-works': 'The full pipeline, stage by stage.',
     '/podcast-to-shorts': 'Two-speaker episodes without cropping anyone out.',
     '/youtube-to-shorts-converter': 'Paste a link, get 9:16 clips with subtitles.',
+    '/gta-5-clips': 'Stream VODs, webcam inset kept, no per-minute meter.',
     '/mcp': 'Drive the whole pipeline from Claude, ChatGPT or n8n.',
     '/automate-shorts-api': 'One POST in, one signed webhook out, no polling.',
     '/n8n-youtube-shorts-automation': 'The importable workflow: channel in, approved shorts out.',

@@ -202,6 +202,7 @@ const footer = (_related) => `
     <a href="/open-source-ai-video-generator">Open source AI video generator</a>
     <a href="/podcast-to-shorts">Podcast to shorts</a>
     <a href="/youtube-to-shorts-converter">YouTube to Shorts converter</a>
+    <a href="/gta-5-clips">GTA 5 clips</a>
     <a href="/how-openshorts-works">How it works</a>
     <a href="/alternatives">Alternatives compared</a>
     <a href="/mcp">MCP server and API</a>
