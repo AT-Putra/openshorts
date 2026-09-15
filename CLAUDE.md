@@ -137,6 +137,42 @@ LLM it logs one line and keeps the transcript hook. `HOOK_GROUNDING=0`
 disables it. The detail prompt itself now carries the rule "about this
 moment, not the video", which is the cheap half of the same fix.
 
+### Silent footage: the vision fallback (`main.get_visual_clips`)
+
+The moment picker reads the transcript, so a video with nothing said in it
+would score nothing. `main.py` switches paths by itself instead, and the
+switch is the part worth knowing because it is not only "no audio track":
+`transcribe_video` raising `NoAudioError`, **and** `speech_is_sparse()`
+coming back true, both set `transcript = None` and route to
+`get_visual_clips`. Sparse means under `MIN_SPEECH_WORDS` (8) in total or
+under `MIN_SPEECH_WORDS_PER_MIN` (5). Music-only footage and a session
+recorded with the mic muted transcribe to a handful of stray words, which
+is worse than silence: without that second test the picker scores those
+words and cuts around them.
+
+The vision pass uploads the video, Gemini watches it and returns the same
+`{"shorts"}` shape (`gemini_worker.VisualResponse`) in the same 15-60s
+band, so every stage after it is byte-identical: layouts, inset detection,
+hooks. `CLIP_TARGET_MIN`/`MAX` apply directly here rather than being
+derived from scoring windows, because there are none. The transcript is
+stored as `{"language": "none", "segments": []}`, so the clips come out
+with no subtitles, which is correct and not a bug.
+
+**This is the one stage that sends Gemini the video instead of frames, and
+that is deliberate** — 12 frames can say what kind of video this is (which
+is all the layout picker needs), they cannot say which 40 seconds to cut.
+The cost is the ceiling: Gemini bills video at ~300 tokens/second, so an
+hour is ~1.08M tokens, past a 1M window, and **nothing guards the length**.
+A silent multi-hour source fails at the model rather than politely. If that
+needs fixing, the answer is a guard or segmenting the source, not porting
+the frame trick over from the layout picker. Gemini-only either way: a
+text-only `LLM_BASE_URL` server cannot see footage, and with no
+`GEMINI_API_KEY` the function logs one line and returns None, which fails
+the job outright.
+
+The public `/gta-5-clips` page states these thresholds and this ceiling to
+users; if the behaviour changes, change `dashboard/seo/pages.js` too.
+
 ### Local LLM for the moment picker (`llm_backend.py`)
 
 `LLM_BASE_URL` (+ `LLM_MODEL`, `LLM_API_KEY`) routes the two transcript
