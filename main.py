@@ -13,6 +13,7 @@ from scenedetect.detectors import ContentDetector
 from ultralytics import YOLO
 import torch
 import os
+import math
 import numpy as np
 from tqdm import tqdm
 import yt_dlp
@@ -720,6 +721,63 @@ def plan_download_attempts(direct_first, statics, paid, have_hd, youtube=True):
     plan.append(('fallback', bool(paid),
                  paid if paid else (statics[0] if statics else None)))
     return plan
+
+
+def cap_source_duration(input_video, max_minutes):
+    """Cut ``input_video`` down to its first ``max_minutes`` minutes, in place.
+
+    Set through ``MAX_SOURCE_MINUTES`` by app.py when the user accepted the
+    quota wall's "clip the first N minutes" offer: only N minutes were
+    reserved, so nothing downstream may see more of the source than that.
+    Cutting the file itself (rather than passing a window around) keeps every
+    later stage byte-identical: transcription, the layout picker, the clip
+    editor's re-renders and ``/api/source`` all read the same path. A source
+    already within the cap is left untouched.
+
+    Stream copy first (seconds, no quality loss; the cut lands on a packet
+    boundary a fraction of a second past N). If the container refuses a copy
+    the fallback re-encodes, which is slow but rare.
+    """
+    try:
+        secs = float(max_minutes) * 60.0
+    except (TypeError, ValueError):
+        return input_video
+    if secs <= 0:
+        return input_video
+    duration = 0.0
+    try:
+        cap = cv2.VideoCapture(input_video)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        duration = (int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) / fps) if fps else 0.0
+        cap.release()
+    except Exception:
+        duration = 0.0
+    if duration and duration <= secs + 1.0:
+        return input_video
+    root, ext = os.path.splitext(input_video)
+    tmp = f"{root}.capped{ext or '.mp4'}"
+    attempts = [
+        ["-c", "copy"],
+        ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "160k"],
+    ]
+    for codec_args in attempts:
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", input_video,
+               "-t", f"{secs:.3f}", *codec_args, "-movflags", "+faststart", tmp]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
+            os.replace(tmp, input_video)
+            shown = f"{int(math.ceil(duration / 60))}" if duration else "?"
+            print(f"✂️ Clipping the first {float(max_minutes):g} min of {shown}: "
+                  f"that is what the plan's remaining minutes cover.")
+            return input_video
+        except Exception as e:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            print(f"⚠️ Could not cut the source to {float(max_minutes):g} min "
+                  f"({' '.join(codec_args[:2])}): {str(e)[:200]}")
+    raise RuntimeError(f"could not cut the source to its first {float(max_minutes):g} minutes")
 
 
 def download_youtube_video(url, output_dir="."):
@@ -1872,6 +1930,11 @@ if __name__ == '__main__':
     if not os.path.exists(input_video):
         print(f"❌ Input file not found: {input_video}")
         exit(1)
+
+    # Quota-wall offer: only the first N minutes were paid for (see
+    # cap_source_duration). Must run before anything reads the file.
+    if os.environ.get("MAX_SOURCE_MINUTES", "").strip():
+        input_video = cap_source_duration(input_video, os.environ["MAX_SOURCE_MINUTES"])
 
     # Layout choice is per SOURCE video, not per clip: one upload and one call
     # instead of one per clip, and the answer is a property of the material

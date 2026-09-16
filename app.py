@@ -247,10 +247,51 @@ def _check_probe_rate(user_id):
     times.append(now)
 
 
-async def reserve_process_minutes(request, url, input_path, job_id):
+def partial_offer(minutes_required: float, minutes_remaining: float) -> int:
+    """Minutes of the source we can offer to clip instead of a 402, or 0.
+
+    The offer is the caller's whole remaining balance, floored to full minutes
+    (the reservation is in whole minutes), and only when it is both worth
+    clipping (``PARTIAL_MIN_MINUTES``) and actually shorter than the source.
+    """
+    from cloud import config as _cfg  # plain constants; importable with billing off
+    offer = int(math.floor(max(0.0, float(minutes_remaining or 0))))
+    if offer < _cfg.PARTIAL_MIN_MINUTES or offer >= minutes_required:
+        return 0
+    return offer
+
+
+def plan_partial_minutes(minutes_required: int, minutes_remaining: float, max_minutes):
+    """How many minutes to reserve for a source of ``minutes_required``.
+
+    Returns ``(reserve, partial)``: ``partial`` is None for a normal whole-video
+    job, or ``{"processed_minutes", "total_minutes"}`` when the caller asked
+    (``max_minutes``) to clip only the first part. The slice is capped by the
+    balance as well as by the request, so a client cannot name a bigger cut
+    than it can pay for; when the slice would be too small the request falls
+    through to the ordinary quota check (and its 402).
+    """
+    if max_minutes is None:
+        return minutes_required, None
+    try:
+        asked = float(max_minutes)
+    except (TypeError, ValueError):
+        return minutes_required, None
+    from cloud import config as _cfg
+    cap = int(math.floor(min(asked, max(0.0, float(minutes_remaining or 0)))))
+    if minutes_required <= cap or cap < _cfg.PARTIAL_MIN_MINUTES:
+        return minutes_required, None
+    return cap, {"processed_minutes": cap, "total_minutes": minutes_required}
+
+
+async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=None):
     """Meter a managed /api/process request.
 
-    Returns (user_id, priority, reservation_id, plan).
+    Returns (user_id, priority, reservation_id, plan, partial).
+
+    ``partial`` is None unless the caller asked (``max_minutes``) to clip only
+    the first part of a source its balance cannot cover whole; then it is the
+    ``plan_partial_minutes`` dict and only that many minutes are reserved.
 
     BYOK / self-host requests don't consume minutes (priority 2, no reservation).
     For a managed (entitled, no BYOK header) request this probes the input
@@ -263,10 +304,10 @@ async def reserve_process_minutes(request, url, input_path, job_id):
     on the operator's key for free. Only skip metering when billing is off.
     """
     if not BILLING_ENABLED:
-        return None, 2, None, None
+        return None, 2, None, None, None
     user = await _user_from_request(request)
     if not managed_keys.has_active_entitlement(user):
-        return None, 2, None, None  # shouldn't happen (resolve_gemini would have 402'd)
+        return None, 2, None, None, None  # shouldn't happen (resolve_gemini would have 402'd)
 
     priority = _cloud_config.PLAN_PRIORITY.get(user.plan, 1)
 
@@ -290,6 +331,7 @@ async def reserve_process_minutes(request, url, input_path, job_id):
             "error": "quota_exceeded",
             "minutes_required": 1,
             "minutes_remaining": balance["remaining"],
+            "partial_minutes": 0,
         })
 
     # Probe rate limit: probing costs a (cheap) proxied metadata call. The
@@ -326,17 +368,22 @@ async def reserve_process_minutes(request, url, input_path, job_id):
             pass
     minutes = max(1, math.ceil(minutes))
 
+    # A source longer than the balance can be clipped in part instead of
+    # refused: the wall offers "the first N minutes" (``partial_minutes`` in
+    # the 402 below) and the client resubmits with ``max_minutes``.
+    reserve, partial = plan_partial_minutes(minutes, balance["remaining"], max_minutes)
     try:
-        reservation_id = await _metering.reserve_minutes(user.id, minutes, job_id)
+        reservation_id = await _metering.reserve_minutes(user.id, reserve, job_id)
     except _metering.QuotaExceeded as e:
         _maybe_send_quota_email(user)
         raise HTTPException(status_code=402, detail={
             "error": "quota_exceeded",
             "minutes_required": e.required,
             "minutes_remaining": e.remaining,
+            "partial_minutes": partial_offer(e.required, e.remaining),
         })
 
-    return user.id, priority, reservation_id, user.plan
+    return user.id, priority, reservation_id, user.plan, partial
 
 
 async def reserve_managed_action(request, minutes, job_id, job_type):
@@ -856,7 +903,8 @@ def _install_drain_signal_handler():
 
 
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
-                           webhook_url=None, webhook_secret=None, base_url=None):
+                           webhook_url=None, webhook_secret=None, base_url=None,
+                           partial=None):
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         with open(path, "w") as f:
@@ -873,6 +921,9 @@ def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, water
                 "webhook_url": webhook_url,
                 "webhook_secret": webhook_secret,
                 "base_url": base_url,
+                # A resumed job downloads the source again, so the cut must
+                # travel with it: only these minutes were reserved.
+                "partial": partial,
             }, f)
     except Exception as e:
         print(f"⚠️ Could not write resume manifest for {job_id}: {e}")
@@ -964,6 +1015,11 @@ def _resume_interrupted_jobs() -> set:
             env["WATERMARK"] = "1"
         else:
             env.pop("WATERMARK", None)
+        partial = m.get("partial")
+        if partial and partial.get("processed_minutes"):
+            env["MAX_SOURCE_MINUTES"] = str(partial["processed_minutes"])
+        else:
+            env.pop("MAX_SOURCE_MINUTES", None)
 
         m["attempts"] = attempts
         try:
@@ -981,6 +1037,7 @@ def _resume_interrupted_jobs() -> set:
             'user_id': None if user_id is None else user_id,
             'reservation_id': reservation_id,
             'watermark': bool(m.get("watermark")),
+            'partial': partial or None,
             'webhook_url': m.get("webhook_url"),
             'webhook_secret': m.get("webhook_secret"),
             'base_url': m.get("base_url"),
@@ -2242,6 +2299,7 @@ async def process_endpoint(
     thumbnail_session_id: Optional[str] = Form(None),
     captions: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
+    max_minutes: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
@@ -2276,6 +2334,7 @@ async def process_endpoint(
         thumbnail_session_id = body.get("thumbnail_session_id")
         captions = body.get("captions")
         upload_id = body.get("upload_id")
+        max_minutes = body.get("max_minutes")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -2523,7 +2582,12 @@ async def process_endpoint(
     print(f"[attestation] job={job_id} ip={attestation['ip']} source={attestation['source']} ack=true")
 
     # Meter + reserve minutes for managed users (no-op for BYOK / self-host).
-    user_id, priority, reservation_id, user_plan = await reserve_process_minutes(request, url, input_path, job_id)
+    user_id, priority, reservation_id, user_plan, partial = await reserve_process_minutes(
+        request, url, input_path, job_id, max_minutes=max_minutes)
+    if partial:
+        # main.py cuts the source down to this many minutes before anything
+        # reads it, so the whole pipeline (and the editor) sees a short video.
+        env["MAX_SOURCE_MINUTES"] = str(partial["processed_minutes"])
     if user_plan == "free":
         # Free-plan clips carry a burned-in watermark (applied by the main.py
         # subprocess after each clip renders).
@@ -2545,6 +2609,7 @@ async def process_endpoint(
         'user_id': user_id,
         'reservation_id': reservation_id,
         'watermark': env.get("WATERMARK") == "1",
+        'partial': partial,
         'webhook_url': webhook_url,
         'webhook_secret': webhook_secret,
         'base_url': api_base,
@@ -2565,11 +2630,11 @@ async def process_endpoint(
     _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id,
                            watermark=jobs[job_id]['watermark'],
                            webhook_url=webhook_url, webhook_secret=webhook_secret,
-                           base_url=api_base)
+                           base_url=api_base, partial=partial)
 
     _enqueue_job(job_id, priority)
 
-    return {"job_id": job_id, "status": "queued"}
+    return {"job_id": job_id, "status": "queued", "partial": partial}
 
 def _job_view_from_disk(job_id):
     """What the disk says about a job this instance does not hold in memory.
@@ -2620,7 +2685,10 @@ async def get_status(job_id: str, request: Request):
     return {
         "status": _presented_status(job_id, job),
         "logs": _visible_logs(job['logs']),
-        "result": job.get('result')
+        "result": job.get('result'),
+        # Set when only the first part of the source was clipped (quota wall
+        # offer), so the dashboard can say so next to the clips.
+        "partial": job.get('partial'),
     }
 
 

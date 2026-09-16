@@ -137,6 +137,26 @@ LLM it logs one line and keeps the transcript hook. `HOOK_GROUNDING=0`
 disables it. The detail prompt itself now carries the rule "about this
 moment, not the video", which is the cheap half of the same fix.
 
+### The quota wall offers the first N minutes (`app.partial_offer`)
+
+The wall (`TopUpModal`, context `wall`) opens on a 402 from `/api/process`.
+Measured on 16-sep-2026, 93 of 99 walls were shown to accounts with their
+20 free minutes **untouched** that had pasted a 21-90 min video: the user was
+asked for $12 before seeing one clip, and 41 of the 68 subscriptions Stripe
+created in 30 days expired unpaid, none of them a card decline. So the 402
+now carries `partial_minutes` (the floored balance, when it is at least
+`PARTIAL_MIN_MINUTES` and shorter than the source), the wall shows "clip the
+first N min" next to the plans, and the dashboard resubmits the same job with
+`max_minutes=N`. `reserve_process_minutes` then reserves N (never more than
+the balance, whatever the client asks) and sets `MAX_SOURCE_MINUTES` for
+`main.py`, whose `cap_source_duration` cuts the downloaded/uploaded file **in
+place** before anything reads it, so transcription, the layout picker, the
+editor and `/api/source` all see a short video. The cut travels in the
+resume manifest: a resumed job downloads the source again and would
+otherwise process 45 minutes on a 20-minute reservation. `/api/status` and
+the process response carry `partial`, and the results view says which part
+of the video the clips came from, with the upsell for the rest.
+
 ### Silent footage: the vision fallback (`main.get_visual_clips`)
 
 The moment picker reads the transcript, so a video with nothing said in it

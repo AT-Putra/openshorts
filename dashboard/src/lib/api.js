@@ -15,6 +15,8 @@ export class QuotaError extends Error {
     this.name = 'QuotaError';
     this.minutesRequired = detail?.minutes_required;
     this.minutesRemaining = detail?.minutes_remaining;
+    // Minutes of the source the server offers to clip instead (0 = no offer).
+    this.partialMinutes = Number(detail?.partial_minutes) || 0;
   }
 }
 

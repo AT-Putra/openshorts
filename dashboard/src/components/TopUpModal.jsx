@@ -36,7 +36,14 @@ const PLAN_BLURBS = {
 //          'upsell' = user opened it voluntarily (results banner, header meter)
 //          — different framing: they still HAVE minutes, sell the watermark
 //          removal + permanence instead of "you ran out".
-export default function TopUpModal({ onClose, required, remaining, context = 'wall' }) {
+// partialMinutes / onPartial: the server's offer to clip only the first N
+// minutes of the blocked video on the minutes the user has (see
+// app.partial_offer). Most walls open on an account that has not spent a
+// single free minute and pasted a 21-90 min video (93 of 99 sampled,
+// 16-sep-2026): they are being asked to pay before seeing one clip. The offer
+// turns that wall into a first run; the plans stay the way to the whole video.
+export default function TopUpModal({ onClose, required, remaining, partialMinutes = 0, onPartial = null,
+                                     context = 'wall' }) {
   const [plans, setPlans] = useState([]);
   const [topups, setTopups] = useState([]);
   const [showTopups, setShowTopups] = useState(false);
@@ -103,6 +110,8 @@ export default function TopUpModal({ onClose, required, remaining, context = 'wa
   }).format((a || 0) / 100);
 
   const blockedByLength = typeof required === 'number' && typeof remaining === 'number';
+  const partialOffer = !isUpsell && partialMinutes > 0 && typeof onPartial === 'function';
+  const remainingShown = Math.max(0, Math.round((remaining || 0) * 10) / 10);
 
   return (
     <Modal isOpen onClose={onClose} eyebrow="UPGRADE"
@@ -113,11 +122,25 @@ export default function TopUpModal({ onClose, required, remaining, context = 'wa
           ? <>Every clip comes out <b className="text-ink font-medium">ready to post</b> and stays in your
               library for good. On the free plan they carry a watermark and are deleted after 7 days.</>
           : blockedByLength
-            ? <>This video needs <b className="text-ink font-medium">{required} min</b> and you have{' '}
-                <b className="text-ink font-medium">{Math.max(0, Math.round((remaining || 0) * 10) / 10)} min</b> left
-                this month. Pick a plan and it starts rendering right away.</>
+            ? <>This video is <b className="text-ink font-medium">{required} min</b> long and you have{' '}
+                <b className="text-ink font-medium">{remainingShown} min</b> this month. Pick a plan and the
+                whole video starts rendering right away.</>
             : <>You've used your free minutes for this month. Pick a plan and keep clipping right away.</>}
       </p>
+
+      {partialOffer && (
+        <div className="mb-5 card p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex-1 text-sm text-ink2">
+            <b className="text-ink font-medium">Or see it first:</b> clip the first{' '}
+            <b className="text-ink font-medium">{partialMinutes} min</b> now with the minutes you have,
+            and decide with the clips in front of you.
+          </div>
+          <button onClick={onPartial} disabled={busyPrice !== null}
+                  className="btn-ghost whitespace-nowrap">
+            Clip the first {partialMinutes} min
+          </button>
+        </div>
+      )}
 
       <div className="grid sm:grid-cols-3 gap-3">
         {plans.map((entry) => {

@@ -61,6 +61,15 @@ BILLING_ATTENTION_STATES = ("past_due", "unpaid", "incomplete", "paused")
 # within 24h), so blocking that would only stop the retry.
 CHECKOUT_BLOCKING_STATES = ("active", "trialing", "past_due", "unpaid", "paused")
 
+# Smallest slice of a long video worth offering instead of the quota wall.
+# A user whose remaining minutes cannot cover the whole source is offered its
+# first N minutes (N = what they have left) so they see clips before paying:
+# 93 of the 99 walls sampled to 16-sep-2026 were shown to accounts with their
+# 20 free minutes untouched, pasting a 21-90 min video, and most left Stripe
+# without paying. Below this many minutes the slice cannot hold a few 15-60 s
+# clips, so the wall stays as it was.
+PARTIAL_MIN_MINUTES = 5
+
 # Minute cap DURING the trial (across all plans). Kept for grandfathered
 # 'trialing' subscriptions; removable once no subscription has status
 # 'trialing'.

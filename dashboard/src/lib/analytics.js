@@ -17,6 +17,8 @@ import { allows } from './consent';
 //                          'wall' | 'upsell' | 'pricing')
 //   - CheckoutRedirected — Stripe returned a URL and we are sending them there
 //   - CheckoutFailed     — /api/billing/checkout errored, `reason` says why
+//   - PartialClipChosen  — the wall's "clip the first N min" taken instead of a
+//                          plan (`required` / `partial` minutes)
 //   - Subscribed         — plan activated after checkout
 //   - SocialNudgeSeen    — post-generation "connect socials" banner rendered
 //   - SocialNudgeConnect — its connect button clicked (opens hosted connect page)

@@ -206,6 +206,9 @@ function App() {
   const [tutorialPhase, setTutorialPhase] = useState(null); // null | intro | coach | celebrate
   const [showTrialUpgrade, setShowTrialUpgrade] = useState(false);
   const [topUpInfo, setTopUpInfo] = useState({});
+  // {processed_minutes, total_minutes} when the running/finished job clips
+  // only the first part of the source (the quota wall's free offer).
+  const [partialJob, setPartialJob] = useState(null);
   // Durable R2 URLs (per clip index) for the current job — used as a fallback when
   // the ephemeral local /videos/ files have been cleaned up (e.g. after a reload).
   const [durableClips, setDurableClips] = useState({});
@@ -660,6 +663,8 @@ function App() {
             setResults(data.result);
           }
 
+          if (data.partial) setPartialJob(data.partial);
+
           if (data.status === 'completed') {
             setStatus('complete');
             clearInterval(interval);
@@ -845,6 +850,7 @@ function App() {
     setQualityGate(null);
     setProjectState(null);
     setNoSource(false);
+    setPartialJob(null);
 
     try {
       let body;
@@ -864,6 +870,9 @@ function App() {
         auto_hook_style: data.autoHook ? (data.autoHookStyle || 'classic') : null,
         // 'auto' is the server default, so only a deliberate choice travels.
         layouts: data.layout && data.layout !== 'auto' ? data.layout : null,
+        // Set when the user took the quota wall's "clip the first N minutes"
+        // offer: the server reserves N minutes and cuts the source to them.
+        max_minutes: data.maxMinutes || null,
       };
 
       if (data.type === 'url') {
@@ -910,6 +919,7 @@ function App() {
       }
 
       setJobId(resData.job_id);
+      setPartialJob(resData.partial || null);
       if (data.type === 'thumbnail_session') {
         setProcessingMedia({ type: 'server', payload: `/api/source/${resData.job_id}` });
       }
@@ -925,7 +935,21 @@ function App() {
         if (me?.status === 'trialing') {
           setShowTrialUpgrade(true);
         } else {
-          setTopUpInfo({ required: e.minutesRequired, remaining: e.minutesRemaining });
+          // The wall can offer the first N minutes of this same submission on
+          // the minutes they have: same data, plus max_minutes.
+          const partial = e.partialMinutes || 0;
+          setTopUpInfo({
+            required: e.minutesRequired,
+            remaining: e.minutesRemaining,
+            partialMinutes: partial,
+            onPartial: partial
+              ? () => {
+                  track('PartialClipChosen', { props: { required: e.minutesRequired, partial } });
+                  setShowTopUp(false);
+                  handleProcess({ ...data, maxMinutes: partial }, forceLowQuality);
+                }
+              : null,
+          });
           setShowTopUp(true);
         }
         return;
@@ -946,6 +970,7 @@ function App() {
     setProcessingMedia(null);
     setProjectState(null);
     setNoSource(false);
+    setPartialJob(null);
     localStorage.removeItem(SESSION_KEY);
   };
 
@@ -1879,9 +1904,20 @@ function App() {
 
                 {status === 'complete' && results?.clips?.length > 0 && (
                   <div className="mb-2 space-y-2">
+                    {/* Partial job: the clips on screen come from the first N
+                        minutes only. Say so, and sell the rest of the video. */}
+                    {partialJob && (
+                      <button
+                        onClick={() => { setTopUpInfo({ context: 'upsell' }); setShowTopUp(true); }}
+                        className="w-full text-left px-3 py-2.5 rounded-input bg-paper3 border border-brass/40 hover:border-brass text-sm transition-colors"
+                      >
+                        <span className="text-ink">These clips come from the first {partialJob.processed_minutes} of {partialJob.total_minutes} minutes.</span>{' '}
+                        <span className="text-brass font-medium">Clip the whole video →</span>
+                      </button>
+                    )}
                     {/* Peak-moment upsell: they just SAW their clips — sell while
                         they're proud of the result, before asking for stars. */}
-                    {plan === 'free' && (
+                    {plan === 'free' && !partialJob && (
                       <button
                         onClick={() => { setTopUpInfo({ context: 'upsell' }); setShowTopUp(true); }}
                         className="w-full text-left px-3 py-2.5 rounded-input bg-paper3 border border-brass/40 hover:border-brass text-sm transition-colors"
@@ -2167,6 +2203,8 @@ function App() {
           onClose={() => setShowTopUp(false)}
           required={topUpInfo.required}
           remaining={topUpInfo.remaining}
+          partialMinutes={topUpInfo.partialMinutes}
+          onPartial={topUpInfo.onPartial}
           context={topUpInfo.context || 'wall'}
         />
       )}
