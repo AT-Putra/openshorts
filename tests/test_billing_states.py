@@ -86,10 +86,8 @@ class TestNewSubscriberAlert:
     """The 'New subscriber' admin alert must mean money, not a click on pay."""
 
     def test_incomplete_is_silent(self):
-        from cloud.billing import new_subscriber_label
-        assert new_subscriber_label("incomplete") is None
+        assert config.new_subscriber_label("incomplete") is None
 
     @pytest.mark.parametrize("status", ["active", "trialing"])
     def test_paid_states_alert(self, status):
-        from cloud.billing import new_subscriber_label
-        assert new_subscriber_label(status)
+        assert config.new_subscriber_label(status)

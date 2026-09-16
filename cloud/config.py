@@ -61,6 +61,21 @@ BILLING_ATTENTION_STATES = ("past_due", "unpaid", "incomplete", "paused")
 # within 24h), so blocking that would only stop the retry.
 CHECKOUT_BLOCKING_STATES = ("active", "trialing", "past_due", "unpaid", "paused")
 
+def new_subscriber_label(status: str):
+    """Admin-alert text for a brand-new subscription row, or None to stay silent.
+
+    Only states where a payment method actually went through count. Stripe
+    creates the row as 'incomplete' seconds after the Checkout page opens,
+    before the user types anything; announcing that is announcing a click.
+    Lives here (not in billing.py) so the test runs without the stripe SDK.
+    """
+    if status == "trialing":
+        return "trial started — card on file"
+    if status == "active":
+        return status
+    return None
+
+
 # Smallest slice of a long video worth offering instead of the quota wall.
 # A user whose remaining minutes cannot cover the whole source is offered its
 # first N minutes (N = what they have left) so they see clips before paying:

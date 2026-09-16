@@ -16,7 +16,8 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from .config import settings, PLAN_MINUTES, TRIAL_DAYS, SUBSCRIPTION_LOOKUP_KEYS, TOPUP_LOOKUP_KEYS
+from .config import (settings, PLAN_MINUTES, TRIAL_DAYS, SUBSCRIPTION_LOOKUP_KEYS,
+                     TOPUP_LOOKUP_KEYS, new_subscriber_label)
 from . import analytics, config, database
 from .models import User, Subscription, CreditTopup, StripeEvent, SignupAttribution
 from .auth import get_current_user_required
@@ -488,19 +489,6 @@ def _sub_period(sub_obj: dict):
     start = sub_obj.get("current_period_start") or item.get("current_period_start")
     end = sub_obj.get("current_period_end") or item.get("current_period_end")
     return start, end
-
-
-def new_subscriber_label(status: str) -> str | None:
-    """Alert text for a brand-new subscription row, or None to stay silent.
-
-    Only states where a payment method actually went through count: an
-    'incomplete' row is a checkout that has not been paid (yet), not a sale.
-    """
-    if status == "trialing":
-        return "trial started — card on file"
-    if status == "active":
-        return status
-    return None
 
 
 async def _upsert_subscription(sub_obj: dict, event_created: datetime):
