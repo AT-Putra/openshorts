@@ -490,6 +490,19 @@ def _sub_period(sub_obj: dict):
     return start, end
 
 
+def new_subscriber_label(status: str) -> str | None:
+    """Alert text for a brand-new subscription row, or None to stay silent.
+
+    Only states where a payment method actually went through count: an
+    'incomplete' row is a checkout that has not been paid (yet), not a sale.
+    """
+    if status == "trialing":
+        return "trial started — card on file"
+    if status == "active":
+        return status
+    return None
+
+
 async def _upsert_subscription(sub_obj: dict, event_created: datetime):
     price_id = _sub_price_id(sub_obj)
     info = plan_info_for_price(price_id)
@@ -554,10 +567,16 @@ async def _upsert_subscription(sub_obj: dict, event_created: datetime):
                     setattr(row, k, v)
 
     # Purchase alert: someone just subscribed (trial started or paid outright).
+    # Not for 'incomplete': Checkout creates the subscription the moment the
+    # user hits pay, before 3DS / the card answer, so that status only says
+    # someone reached the button. About half of them expire unpaid (24 of 53
+    # in the 30 days to 16-sep-2026), and the ones that do pay are announced
+    # by the 'Payment received' alert on invoice.paid, which carries the
+    # amount; a second message here would just be noise.
     now_status = sub_obj["status"]
-    if is_new_sub:
+    label = new_subscriber_label(now_status) if is_new_sub else None
+    if label:
         from .alerts import send_admin_alert
-        label = "trial started — card on file" if now_status == "trialing" else now_status
         await send_admin_alert(
             "🎉 New subscriber",
             f"{buyer_email or 'A user'} started the {plan} ({interval}) plan.\nStatus: {label}.",
