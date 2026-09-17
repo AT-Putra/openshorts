@@ -202,9 +202,31 @@ Gemini enforces server-side, so `main.py` sees one shape. `main.score_batch_size
 drops to 3 windows per call there (local contexts are 4-8k; a truncated
 prompt scores garbage silently). Self-host `/api/process` then accepts a
 request without `X-Gemini-Key` and `/api/config.localLlm` tells the dashboard
-not to demand one. Frame-based stages (`layout_picker`, `screencast_layout`,
-`get_visual_clips`) stay on Gemini and degrade as they always did without a
-key. Never wired in cloud mode: `BILLING_ENABLED` ignores it.
+not to demand one. Never wired in cloud mode: `BILLING_ENABLED` ignores it.
+
+Two more variables extend the same server past text, each opt-in because a
+text model handed frames answers garbage: `LLM_VISION_MODEL` (a chat model
+that takes `image_url` parts) routes the four frame stages — `layout_picker`,
+`hook_grounding`, `screencast_layout.detect_content_ranges` and
+`main.get_visual_clips` — and `LLM_IMAGE_MODEL` routes the Thumbnail Studio
+images through `POST {base}/images/generations`. The first two frame stages
+send the same JPEGs and prompts they send Gemini. The last two send Gemini
+the **video file**, which no chat endpoint accepts, so on the local route
+they get `llm_backend.timed_frames`: `LLM_VISION_MAX_FRAMES` (48) frames at
+`LLM_VISION_FRAME_WIDTH` (640) px, each preceded by a `t=12.5s` label, plus
+`frame_strip_preface` in front of the unchanged prompt. That is coarser than
+watching the footage (one frame every ~12 s on a 10-minute source) and it is
+the ceiling of the approach, not a bug to fix by sending more frames. Each
+capability falls back to Gemini on its own when a key is present, so a
+text-only local server with a Gemini key still gets Gemini frames and
+thumbnails, and with neither the stage degrades as before.
+`/images/edits` (the reference face photo) is optional on the server:
+a 4xx there is reported with "no image" in the message, which is the phrase
+`thumbnail.generate_thumbnail` already retries on without the person.
+Measured on 9router (17-sep-2026): `cx/gpt-5.6-sol` reads frames and answers
+JSON in ~5 s; `cx/gpt-image-2.5-flare` returns 16:9 only when `size` is a
+landscape value **and** the prompt says so (square otherwise), ~20 s per
+image; `/images/edits` is 404 there.
 
 ### Thumbnail Studio (`thumbnail.py`, `/api/thumbnail/*`)
 

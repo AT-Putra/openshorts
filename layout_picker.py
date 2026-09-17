@@ -128,25 +128,47 @@ def sample_frames(video_path, n=None, width=None):
     return out
 
 
-def pick(video_path, video_duration):
-    """The layout Gemini picks for this video, or "none" on any failure.
+def _ask_gemini(frames, api_key):
+    """One Gemini call over the sampled frames; returns the parsed dict."""
+    from google import genai
+    from google.genai import types as genai_types
+    import gemini_worker
 
-    Never raises: a missing answer has to degrade to today's routing rather
-    than break the job.
+    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+    client = genai.Client(api_key=api_key)
+    parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg")
+             for b in frames]
+    response = client.models.generate_content(
+        model=model_name,
+        contents=parts + [gemini_worker.LAYOUT_CHOICE_PROMPT],
+        config=genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=gemini_worker.LayoutChoice,
+        ))
+    gemini_worker.raise_if_blocked(response)
+    return json.loads(response.text) or {}
+
+
+def pick(video_path, video_duration):
+    """The layout the model picks for this video, or "none" on any failure.
+
+    Gemini by default; the OpenAI-compatible vision model when
+    ``LLM_VISION_MODEL`` is set (``llm_backend.vision_active()``). Never
+    raises: a missing answer has to degrade to today's routing rather than
+    break the job.
     """
     if not ENABLED:
         return "none"
+    import llm_backend
+
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
+    if not api_key and not llm_backend.vision_active():
         return "none"
 
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     print("🎛️  Choosing a layout for this video…")
     try:
         # Inside the try on purpose: the contract above is that this never
         # raises, and an unimportable SDK is just one more reason to fall back.
-        from google import genai
-        from google.genai import types as genai_types
         import gemini_worker
 
         frames = sample_frames(video_path)
@@ -154,18 +176,13 @@ def pick(video_path, video_duration):
             print("   ⚠️ No readable frames — keeping the default layout.")
             return "none"
 
-        client = genai.Client(api_key=api_key)
-        parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg")
-                 for b in frames]
-        response = client.models.generate_content(
-            model=model_name,
-            contents=parts + [gemini_worker.LAYOUT_CHOICE_PROMPT],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=gemini_worker.LayoutChoice,
-            ))
-        gemini_worker.raise_if_blocked(response)
-        answer = json.loads(response.text) or {}
+        if llm_backend.vision_active():
+            # Same frames, same prompt, same schema, on the OpenAI-compatible
+            # vision model: a closed choice travels well between models.
+            answer, _ = llm_backend.generate_json(
+                gemini_worker.LAYOUT_CHOICE_PROMPT, gemini_worker.LayoutChoice, parts=frames)
+        else:
+            answer = _ask_gemini(frames, api_key)
     except Exception as e:
         print(f"   ⚠️ Layout choice failed ({e}) — keeping the default layout.")
         return "none"

@@ -14,9 +14,10 @@ and title are rewritten to name what is shown. Same principle as the layout
 picker: a few frames at a legible resolution answering one concrete
 question. About 3k tokens per clip.
 
-Frames need a model that can see, so this is Gemini-only: with just a local
-LLM (``LLM_BASE_URL``) the function returns None and the transcript-based
-hook stands. Never raises: a hook problem must never cost the clip.
+Frames need a model that can see: Gemini, or the OpenAI-compatible vision
+model when ``LLM_VISION_MODEL`` is set. With neither (a text-only
+``LLM_BASE_URL``) the function returns None and the transcript-based hook
+stands. Never raises: a hook problem must never cost the clip.
 """
 from __future__ import annotations
 
@@ -145,10 +146,12 @@ def reground(clip_path, clip, transcript, start, end) -> Optional[dict]:
     """Rewrite ``clip['viral_hook_text']`` / ``video_title_for_youtube_short``
     in place from the clip's frames. Returns what changed (also stored under
     ``clip['hook_grounding']``), or None when skipped or failed."""
+    import llm_backend
+
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("   🪝 Hook grounding skipped: needs a Gemini key (frames), "
-              "keeping the transcript hook.")
+    if not api_key and not llm_backend.vision_active():
+        print("   🪝 Hook grounding skipped: needs a model that can see frames "
+              "(Gemini key or LLM_VISION_MODEL), keeping the transcript hook.")
         return None
     try:
         import gemini_worker
@@ -163,7 +166,10 @@ def reground(clip_path, clip, transcript, start, end) -> Optional[dict]:
             current_hook=clip.get("viral_hook_text") or "",
             current_title=clip.get("video_title_for_youtube_short") or "",
             transcript=clip_words(transcript, start, end)[:4000] or "(no speech)")
-        answer = _ask_gemini(frames, prompt, api_key)
+        if llm_backend.vision_active():
+            answer, _ = llm_backend.generate_json(prompt, gemini_worker.GroundedHook, parts=frames)
+        else:
+            answer = _ask_gemini(frames, prompt, api_key)
         hook = str(answer.get("viral_hook_text") or "").strip()
         title = str(answer.get("video_title_for_youtube_short") or "").strip()
         if not hook:

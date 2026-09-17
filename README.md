@@ -296,11 +296,28 @@ know:
   with `OLLAMA_CONTEXT_LENGTH=16384` (or set `num_ctx` in a Modelfile); raise
   `LLM_SCORE_BATCH` above 3 only if your context allows it. 7-8B models
   return valid JSON reliably, 3B ones do not.
-- **What still needs Gemini.** Anything that has to look at frames: the
-  automatic layout picker (`AUTO_LAYOUT`), the on-screen content detector
-  and silent videos (no speech to clip by). Without a Gemini key those fall
-  back to the plain face-tracking crop, and a silent video fails with a
-  message that says so. Add a key alongside `LLM_BASE_URL` and you get both.
+- **Frames and images.** By default anything that has to look at frames —
+  the automatic layout picker (`AUTO_LAYOUT`), hook grounding, the on-screen
+  content detector, silent videos — and the Thumbnail Studio images stay on
+  Gemini, and without a key they fall back to the plain face-tracking crop
+  (a silent video fails with a message that says so). Name a model on the
+  same server that can see, and one that can draw, and those move over too:
+
+  ```bash
+  LLM_VISION_MODEL=cx/gpt-5.6-sol           # any chat model that accepts image_url parts
+  LLM_IMAGE_MODEL=cx/gpt-image-2.5-flare    # POST /v1/images/generations
+  # LLM_IMAGE_SIZE=1792x1024                # landscape; the thumbnail is cover-cropped to 1280x720
+  # LLM_VISION_MAX_FRAMES=48                # silent videos / on-screen detector: frames sent instead of the file
+  ```
+
+  Gemini watches the whole file for silent videos and the on-screen
+  detector; a chat endpoint takes no video, so on the local route those two
+  get a strip of timestamped frames (one every ~12 s on a 10-minute source)
+  — coarser, but it runs. A reference face photo needs `/images/edits`;
+  a server without it renders the thumbnail without the person and says so.
+  Podman note: inside the container `localhost` is the container, so point
+  `LLM_BASE_URL` at the host's LAN IP (or `host.containers.internal` when
+  the server binds that address).
 
 ## Technical Pipeline
 

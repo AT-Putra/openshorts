@@ -25,8 +25,10 @@ What is different here is the question asked and what the answer is used for.
     counter. Here the worst case is showing the content full width above the
     speaker, which is a reasonable frame even when the trigger was wrong.
 
-Off by default (``SCREENCAST_LAYOUT=1``). Needs GEMINI_API_KEY; without one it
-is a silent no-op, like every other optional Gemini path here.
+Off by default (``SCREENCAST_LAYOUT=1``). Needs GEMINI_API_KEY or an
+OpenAI-compatible vision model (``LLM_VISION_MODEL``, which gets timestamped
+frames instead of the file); with neither it is a silent no-op, like every
+other optional model path here.
 """
 import json
 import os
@@ -172,7 +174,12 @@ def detect_content_ranges(video_path, video_duration):
     """
     if not ENABLED:
         return []
+    import llm_backend
+
     api_key = os.getenv("GEMINI_API_KEY")
+    if llm_backend.vision_active():
+        raw = _ranges_from_frames(video_path, video_duration)
+        return _clean_ranges(raw, video_duration)
     if not api_key:
         return []
 
@@ -229,6 +236,38 @@ def detect_content_ranges(video_path, video_duration):
                 print(f"   ⚠️ Could not delete the uploaded source from Gemini "
                       f"Files ({e}) — it expires there in 48 h.")
 
+    return _clean_ranges(raw, video_duration)
+
+
+def _ranges_from_frames(video_path, video_duration):
+    """The same question on the OpenAI-compatible vision model, which takes no
+    video file: a strip of timestamped frames stands in for the footage
+    (``llm_backend.timed_frames``). Coarser in time than watching the video
+    (one frame every ~12 s on a 10-minute source), fine for the width gate,
+    which is what the routing keys on. Returns the raw range dicts, [] on
+    any failure."""
+    import llm_backend
+    import gemini_worker
+
+    print("🔎 Checking for full-width on-screen content (frames)…")
+    try:
+        frames = llm_backend.timed_frames(video_path)
+        if not frames:
+            print("   ⚠️ No readable frames — keeping face-only routing.")
+            return []
+        prompt = (llm_backend.frame_strip_preface(frames, video_duration)
+                  + gemini_worker.WIDE_CONTENT_PROMPT_TEMPLATE.format(video_duration=video_duration))
+        answer, _ = llm_backend.generate_json(
+            prompt, gemini_worker.WideContentResponse,
+            parts=llm_backend.frame_strip_parts(frames))
+        return answer.get("ranges") or []
+    except Exception as e:
+        print(f"   ⚠️ On-screen check failed ({e}) — keeping face-only routing.")
+        return []
+
+
+def _clean_ranges(raw, video_duration):
+    """Clamp, gate on width and sort the model's ranges; log the outcome."""
     ranges = []
     for r in raw:
         try:

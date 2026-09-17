@@ -70,11 +70,14 @@ function DragDropZone({ label, accept, onFile, file, onClear, icon }) {
   );
 }
 
-export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUserId, managed = false, onCreateClips = null }) {
+export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUserId, managed = false, localLlm = null, onCreateClips = null }) {
   // Managed (hosted plan): Gemini runs server-side via the bearer token, no BYOK key.
   // Only send X-Gemini-Key for self-host BYOK. apiFetch attaches the bearer token.
+  // Self-host with an OpenAI-compatible server (/api/config.localLlm) needs no
+  // key for titles; images need its imageModel too, or the key.
   const keyHeader = geminiApiKey ? { 'X-Gemini-Key': geminiApiKey } : {};
-  const needsKey = !geminiApiKey && !managed;
+  const needsKey = !geminiApiKey && !managed && !localLlm;
+  const localImages = !!(localLlm && localLlm.imageModel);
   // Step management
   const [step, setStep] = useState(0);
   const [mode, setMode] = useState(null); // 'video' or 'manual'
@@ -266,6 +269,9 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
   // --- Step 3: Generate Thumbnails ---
   const handleGenerate = async () => {
     if (needsKey) return alert('Please set your Gemini API key in Settings first.');
+    if (!geminiApiKey && !managed && !localImages) {
+      return alert('Thumbnails need an image model: set LLM_IMAGE_MODEL on your server, or a Gemini API key in Settings.');
+    }
     const finalTitle = selectedTitle || manualTitle;
     if (!finalTitle) return alert('Please select or enter a title first.');
 
@@ -296,7 +302,9 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
 
       const data = await res.json();
       if (!data.thumbnails || data.thumbnails.length === 0) {
-        throw new Error('No thumbnails were generated. Your Gemini API key may not have access to image generation.');
+        throw new Error(localImages
+          ? 'No thumbnails were generated. Check that LLM_IMAGE_MODEL on your server can generate images.'
+          : 'No thumbnails were generated. Your Gemini API key may not have access to image generation.');
       }
       setGeneratedThumbnails(data.thumbnails);
     } catch (e) {
@@ -497,7 +505,7 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
             <AlertCircle size={18} className="text-warn shrink-0 mt-0.5" />
             <div>
               <p className="text-sm font-medium text-warn lowercase">Gemini API Key Required</p>
-              <p className="text-xs text-muted mt-1">YouTube Studio requires a Google Gemini API key to function. Please configure it in the <strong>Settings</strong> tab before using this feature. Gemini's free tier includes 1,500 requests per day.</p>
+              <p className="text-xs text-muted mt-1">YouTube Studio requires a Google Gemini API key to function. Please configure it in the <strong>Settings</strong> tab before using this feature. Gemini's free tier includes 1,500 requests per day. Self-hosting with an OpenAI-compatible server instead? Set <code>LLM_BASE_URL</code> (titles) and <code>LLM_IMAGE_MODEL</code> (thumbnails) in <code>.env</code>.</p>
             </div>
           </div>
         )}
@@ -901,7 +909,7 @@ export default function ThumbnailStudio({ geminiApiKey, uploadPostKey, uploadUse
                               )}
                             </span>
                             {thumb.why && <p className="text-xs text-muted mt-1 truncate">{thumb.why}</p>}
-                            {thumb.fallback && <p className="text-xs text-warn mt-1">Gemini refused to draw this person (public figures are blocked), so it was rendered without them.</p>}
+                            {thumb.fallback && <p className="text-xs text-warn mt-1">{localImages ? 'Your image server took no reference photo (no /images/edits), so this was rendered without the person.' : 'Gemini refused to draw this person (public figures are blocked), so it was rendered without them.'}</p>}
                           </div>
                           <button
                             onClick={(e) => { e.stopPropagation(); handleDownload(url); }}

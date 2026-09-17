@@ -198,6 +198,17 @@ def resolve_post_profile(forced_profile: Optional[str], client_profile: Optional
     return profile
 
 
+def local_llm_covers(capability="text"):
+    """True when a self-host's OpenAI-compatible server (``LLM_BASE_URL``)
+    covers ``capability`` — ``text``, ``vision`` or ``image`` — so the request
+    can go ahead without a Gemini key. Never in cloud mode: paid users get the
+    managed key or a 402, and the local server is not wired there."""
+    if BILLING_ENABLED:
+        return False
+    return {"text": llm_backend.active, "vision": llm_backend.vision_active,
+            "image": llm_backend.image_active}[capability]()
+
+
 def gemini_missing_error():
     """The right 4xx when no Gemini key could be resolved.
 
@@ -2302,11 +2313,12 @@ async def process_endpoint(
     max_minutes: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
-    if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
+    if not api_key and not local_llm_covers("text"):
         # Self-host with an OpenAI-compatible server configured needs no
         # Google key for the core pipeline: the moment picker runs there and
-        # the frame-based stages degrade on their own (layout_picker returns
-        # "none", silent videos fail with a message that says why).
+        # the frame-based stages either run on LLM_VISION_MODEL or degrade on
+        # their own (layout_picker returns "none", silent videos fail with a
+        # message that says why).
         raise gemini_missing_error()
 
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
@@ -5144,7 +5156,7 @@ async def thumbnail_analyze(
 ):
     """Analyze a video and suggest viral YouTube titles."""
     api_key = await resolve_gemini(request)
-    if not api_key:
+    if not api_key and not local_llm_covers("text"):
         raise gemini_missing_error()
 
     pre_transcript = None
@@ -5246,7 +5258,7 @@ async def thumbnail_titles(
 ):
     """Refine title suggestions or accept a manual title."""
     api_key = await resolve_gemini(request)
-    if not api_key:
+    if not api_key and not local_llm_covers("text"):
         raise gemini_missing_error()
 
     # Manual title mode - just create a session with the user's title
@@ -5325,7 +5337,7 @@ async def thumbnail_generate(
     not. frame: url of a frame from /api/thumbnail/frames to use as the
     person reference when no face photo is uploaded."""
     api_key = await resolve_gemini(request)
-    if not api_key:
+    if not api_key and not local_llm_covers("image"):
         raise gemini_missing_error()
 
     # Image generation is the one expensive managed Gemini call — paid plans only.
@@ -5453,7 +5465,7 @@ async def thumbnail_describe(
 ):
     """Generate a YouTube description with chapters from the transcript."""
     api_key = await resolve_gemini(request)
-    if not api_key:
+    if not api_key and not local_llm_covers("text"):
         raise gemini_missing_error()
 
     if req.session_id not in thumbnail_sessions:

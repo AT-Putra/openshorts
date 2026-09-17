@@ -1783,13 +1783,42 @@ def get_visual_clips(video_path, video_duration, language="en"):
     """Clip a SILENT video by vision: Gemini watches the footage and picks the
     most engaging visual moments (no transcript). Returns the same
     {"shorts", "cost_analysis"} shape as get_viral_clips, or None."""
-    print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
+    print("🎥  Silent video — analyzing by vision (no transcript)...")
+    # The vision path has no scoring windows to derive a count from, so the
+    # env targets (user request) apply directly over the classic 3-15.
+    def _env_int(name, default):
+        try:
+            return max(1, int(os.environ.get(name, "")))
+        except ValueError:
+            return default
+    v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
+    v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
+    v_min_secs, v_max_secs = clip_duration_bounds()
+    prompt = gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
+        video_duration=video_duration, language=language,
+        min_clips=v_min_clips, max_clips=v_max_clips,
+        min_secs=v_min_secs, max_secs=v_max_secs)
+
+    def _clean(shorts):
+        # Clamp to the real duration; drop anything degenerate.
+        clean = []
+        for s in shorts:
+            s["start"] = max(0.0, float(s.get("start", 0)))
+            s["end"] = min(float(video_duration), float(s.get("end", 0)))
+            if s["end"] - s["start"] >= 1.0:
+                clean.append(s)
+        return clean
+
+    if llm_backend.vision_active():
+        return _get_visual_clips_from_frames(video_path, video_duration, prompt, _clean)
+
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         if llm_backend.active():
             print("❌ This video has no usable speech, so it has to be clipped by "
-                  "watching it, and that needs Gemini (a text-only LLM server "
-                  "cannot see the footage). Add a GEMINI_API_KEY for silent videos.")
+                  "watching it, and that needs a model that can see: add a "
+                  "GEMINI_API_KEY, or set LLM_VISION_MODEL on your OpenAI-compatible "
+                  "server (it gets a strip of timestamped frames).")
         else:
             print("❌ Error: GEMINI_API_KEY not found.")
         return None
@@ -1814,20 +1843,6 @@ def get_visual_clips(video_path, video_duration, language="en"):
                 return None
             time.sleep(2)
 
-        # The vision path has no scoring windows to derive a count from, so the
-        # env targets (user request) apply directly over the classic 3-15.
-        def _env_int(name, default):
-            try:
-                return max(1, int(os.environ.get(name, "")))
-            except ValueError:
-                return default
-        v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
-        v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
-        v_min_secs, v_max_secs = clip_duration_bounds()
-        prompt = gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
-            video_duration=video_duration, language=language,
-            min_clips=v_min_clips, max_clips=v_max_clips,
-            min_secs=v_min_secs, max_secs=v_max_secs)
         config = genai_types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=gemini_worker.VisualResponse,
@@ -1836,14 +1851,7 @@ def get_visual_clips(video_path, video_duration, language="en"):
             model=model_name, contents=[file_upload, prompt], config=config)
         gemini_worker.raise_if_blocked(response)
         parsed = json.loads(response.text)
-        shorts = parsed.get("shorts") or []
-        # Clamp to the real duration; drop anything degenerate.
-        clean = []
-        for s in shorts:
-            s["start"] = max(0.0, float(s.get("start", 0)))
-            s["end"] = min(float(video_duration), float(s.get("end", 0)))
-            if s["end"] - s["start"] >= 1.0:
-                clean.append(s)
+        clean = _clean(parsed.get("shorts") or [])
         if not clean:
             print("⚠️ Vision pass returned no usable clips.")
             return None
@@ -1867,6 +1875,37 @@ def get_visual_clips(video_path, video_duration, language="en"):
                 client.files.delete(name=file_upload.name)
             except Exception:
                 pass
+
+
+def _get_visual_clips_from_frames(video_path, video_duration, prompt, clean):
+    """The silent-video pick on the OpenAI-compatible vision model, which takes
+    no video file: ``LLM_VISION_MAX_FRAMES`` timestamped frames stand in for
+    the footage. Twelve frames can say what kind of video this is; forty-eight
+    with timestamps can say roughly where the action is, which is the most a
+    chat endpoint allows. Same ``{"shorts"}`` shape out, so every later stage
+    is unchanged."""
+    model_name = llm_backend.vision_model_name()
+    print(f"🎥  Model: {model_name} | sampling frames from {os.path.basename(video_path)}…")
+    try:
+        frames = llm_backend.timed_frames(video_path)
+        if not frames:
+            print("❌ Vision pass: no readable frames.")
+            return None
+        print(f"🎥  {len(frames)} frames, one every ~{video_duration / len(frames):.1f}s")
+        parsed, cost = llm_backend.generate_json(
+            llm_backend.frame_strip_preface(frames, video_duration) + prompt,
+            gemini_worker.VisualResponse, parts=llm_backend.frame_strip_parts(frames))
+        clean_shorts = clean(parsed.get("shorts") or [])
+        if not clean_shorts:
+            print("⚠️ Vision pass returned no usable clips.")
+            return None
+        result = {"shorts": clean_shorts}
+        if cost:
+            result["cost_analysis"] = cost
+        return result
+    except Exception as e:
+        print(f"❌ Vision error ({model_name}): {e}")
+        return None
 
 
 if __name__ == '__main__':

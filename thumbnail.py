@@ -8,11 +8,19 @@ from google import genai
 from google.genai import types
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
+import llm_backend
+
 # Text/analysis model (titles, concepts, description). Deliberately NOT tied to
 # GEMINI_MODEL: the pipeline runs flash-lite for a closed-choice layout pick,
 # but titles are the one place where the creative gap between lite and flash
 # shows, and ten titles per video cost cents either way. The image model
 # stays on gemini-3.1-flash-image; the text models cannot draw.
+#
+# With an OpenAI-compatible server configured (LLM_BASE_URL) the text calls go
+# there instead (LLM_MODEL; frames ride along only when LLM_VISION_MODEL can
+# see them) and the images come from its /images/generations when
+# LLM_IMAGE_MODEL is set. Each capability falls back to Gemini on its own when
+# a key is present, so a text-only local model still gets Gemini thumbnails.
 TEXT_MODEL = os.environ.get("GEMINI_MODEL_THUMBNAIL") or "gemini-3.7-flash"
 IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL") or "gemini-3.1-flash-image"
 
@@ -44,15 +52,61 @@ def _parse_json(text):
     return obj
 
 
-def _frame_parts(video_path, n=TITLE_FRAMES, width=TITLE_FRAME_WIDTH):
-    """Evenly spaced frames as Gemini image parts (empty list on any failure)."""
+def _frames(video_path, n=TITLE_FRAMES, width=TITLE_FRAME_WIDTH):
+    """Evenly spaced frames as JPEG bytes (empty list on any failure)."""
     try:
         from layout_picker import sample_frames
-        return [types.Part.from_bytes(data=b, mime_type="image/jpeg")
-                for b in sample_frames(video_path, n=n, width=width)]
+        return sample_frames(video_path, n=n, width=width)
     except Exception as e:
         print(f"⚠️ [Thumbnail] Could not sample frames: {e}")
         return []
+
+
+def _gemini_client(api_key):
+    """A Gemini client when the text calls should go to Gemini, else None
+    (the OpenAI-compatible server takes them). ``api_key`` may be None on a
+    self-host that only has the local server."""
+    if llm_backend.active():
+        return None
+    if not api_key:
+        raise RuntimeError("No text model: set GEMINI_API_KEY or LLM_BASE_URL")
+    return genai.Client(api_key=api_key)
+
+
+def _ask_json(client, prompt, frames=()):
+    """One text call that should answer with JSON. Returns
+    ``(parsed_dict_or_None, raw_text)``: None means the answer was not JSON,
+    and the caller keeps its own fallback. Transport errors propagate.
+
+    ``client`` None routes to the OpenAI-compatible server; frames are sent
+    there only when a vision model is configured, dropped otherwise (the
+    transcript alone still yields titles)."""
+    if client is None:
+        parts = list(frames) if (frames and llm_backend.vision_active()) else None
+        try:
+            parsed, _ = llm_backend.generate_json(prompt, None, parts=parts)
+        except ValueError as e:  # not JSON; HTTP errors are RuntimeError
+            return None, str(e)
+        return parsed, json.dumps(parsed, ensure_ascii=False)
+    image_parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in frames]
+    response = client.models.generate_content(
+        model=TEXT_MODEL,
+        contents=image_parts + [prompt],
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+    raw = getattr(response, "text", "") or ""
+    try:
+        return _parse_json(raw), raw
+    except (json.JSONDecodeError, AttributeError):
+        return None, raw
+
+
+def _ask_text(client, prompt):
+    """One text call answered as plain text (the description)."""
+    if client is None:
+        return llm_backend.generate_text(prompt)
+    response = client.models.generate_content(model=TEXT_MODEL, contents=[prompt])
+    return response.text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +128,8 @@ def analyze_video_for_titles(api_key, video_path, transcript=None):
     else:
         print("🎬 [Thumbnail] Using pre-computed transcript (Whisper already done)...")
 
-    client = genai.Client(api_key=api_key)
-    frames = _frame_parts(video_path)
+    client = _gemini_client(api_key)
+    frames = _frames(video_path)
     language = transcript.get("language", "en")
     segments = transcript.get("segments", [])
     video_duration = segments[-1]["end"] if segments else 0
@@ -114,15 +168,9 @@ OUTPUT JSON:
 }}"""
 
     print("🤖 [Thumbnail] Brainstorming titles...")
-    response = client.models.generate_content(
-        model=TEXT_MODEL,
-        contents=frames + [brainstorm_prompt],
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    try:
-        draft = _parse_json(response.text)
-    except (json.JSONDecodeError, AttributeError):
-        print(f"❌ [Thumbnail] Failed to parse brainstorm JSON: {getattr(response, 'text', '')}")
+    draft, raw = _ask_json(client, brainstorm_prompt, frames)
+    if draft is None:
+        print(f"❌ [Thumbnail] Failed to parse brainstorm JSON: {raw}")
         return {
             "titles": ["Could not generate titles - please try again"],
             "thumbnail_texts": [],
@@ -163,18 +211,10 @@ OUTPUT JSON:
 }}"""
 
     print("🧐 [Thumbnail] Scoring titles...")
-    response = client.models.generate_content(
-        model=TEXT_MODEL,
-        contents=[critic_prompt],
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    try:
-        picked = _parse_json(response.text)
-        titles = [t for t in picked.get("titles", []) if isinstance(t, str) and t.strip()]
-        if not titles:
-            raise ValueError("no titles")
-    except (json.JSONDecodeError, AttributeError, ValueError):
-        print(f"⚠️ [Thumbnail] Critic failed, falling back to the brainstorm: {getattr(response, 'text', '')[:300]}")
+    picked, raw = _ask_json(client, critic_prompt)
+    titles = [t for t in (picked or {}).get("titles", []) if isinstance(t, str) and t.strip()]
+    if not titles:
+        print(f"⚠️ [Thumbnail] Critic failed, falling back to the brainstorm: {raw[:300]}")
         titles = candidates[:10]
         picked = {"thumbnail_texts": [], "recommended": []}
 
@@ -197,7 +237,7 @@ def refine_titles(api_key, context, user_message, conversation_history=None):
     """
     Takes video context + user feedback and returns refined title suggestions.
     """
-    client = genai.Client(api_key=api_key)
+    client = _gemini_client(api_key)
 
     history_text = ""
     if conversation_history:
@@ -231,24 +271,15 @@ OUTPUT JSON:
     "language": "ISO 639-1 code of the language the titles are written in"
 }}"""
 
-    response = client.models.generate_content(
-        model=TEXT_MODEL,
-        contents=[prompt],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
-    )
-
-    try:
-        result = _parse_json(response.text)
-        titles = [t for t in result.get("titles", []) if isinstance(t, str) and t.strip()]
-        texts = [str(t) for t in result.get("thumbnail_texts", [])][:len(titles)]
-        texts += [""] * (len(titles) - len(texts))
-        return {"titles": titles, "thumbnail_texts": texts,
-                "language": str(result.get("language") or "")[:5]}
-    except (json.JSONDecodeError, AttributeError):
-        print(f"❌ [Thumbnail] Failed to parse refined titles: {response.text}")
+    result, raw = _ask_json(client, prompt)
+    if result is None:
+        print(f"❌ [Thumbnail] Failed to parse refined titles: {raw}")
         return {"titles": ["Could not refine titles - please try again"], "thumbnail_texts": [], "language": ""}
+    titles = [t for t in result.get("titles", []) if isinstance(t, str) and t.strip()]
+    texts = [str(t) for t in result.get("thumbnail_texts", [])][:len(titles)]
+    texts += [""] * (len(titles) - len(texts))
+    return {"titles": titles, "thumbnail_texts": texts,
+            "language": str(result.get("language") or "")[:5]}
 
 
 # ---------------------------------------------------------------------------
@@ -403,16 +434,12 @@ Per concept give:
 OUTPUT JSON:
 {{"concepts": [{{"text": "...", "text_position": "left", "text_color": "yellow", "scene": "...", "why": "..."}}, ...]}}"""
 
-    response = client.models.generate_content(
-        model=TEXT_MODEL,
-        contents=[prompt],
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    try:
-        concepts = _parse_json(response.text).get("concepts", [])
-    except (json.JSONDecodeError, AttributeError):
-        print(f"⚠️ [Thumbnail] Concept JSON unreadable, using a generic concept: {getattr(response, 'text', '')[:200]}")
+    parsed, raw = _ask_json(client, prompt)
+    if parsed is None:
+        print(f"⚠️ [Thumbnail] Concept JSON unreadable, using a generic concept: {raw[:200]}")
         concepts = []
+    else:
+        concepts = parsed.get("concepts", [])
     return normalise_concepts(concepts, count, title, thumbnail_text_hint)
 
 
@@ -592,16 +619,16 @@ def finalize_thumbnail(img, out_path):
     return out_path
 
 
-def _image_part(path):
-    """A JPEG byte part for the image model (re-encoded so HEIC/PNG uploads
-    and odd modes all arrive the same way)."""
+def _image_bytes(path):
+    """JPEG bytes for the image model (re-encoded so HEIC/PNG uploads and odd
+    modes all arrive the same way)."""
     buf = io.BytesIO()
     Image.open(path).convert("RGB").save(buf, "JPEG", quality=92)
-    return types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
+    return buf.getvalue()
 
 
-def _generate_one(client, concept, reference_images, out_path, burn_text):
-    """One image call for one concept; returns the saved path or raises."""
+def _image_prompt(concept, has_reference, burn_text):
+    """The image-model prompt for one concept, shared by both providers."""
     if burn_text:
         pos = concept['text_position']
         share = "45% of the width" if pos in ("left", "right") else "40% of the height"
@@ -613,22 +640,40 @@ def _generate_one(client, concept, reference_images, out_path, burn_text):
         text_rule = (f'Render the text "{concept["text"]}" in huge bold condensed sans-serif capitals, '
                      f'{concept["text_color"]} with a thick black outline, on the {concept["text_position"]} '
                      "side, spelled EXACTLY as given. No other text.")
-    prompt = f"""Generate a professional YouTube thumbnail, 16:9.
+    prompt = f"""Generate a professional YouTube thumbnail, 16:9 landscape (wide, not square).
 
 {concept['scene']}
 
 {text_rule}
 
 Style: high contrast, saturated colours, crisp subject separation, cinematic lighting, sharp focus on the subject, readable at 168x94 pixels. No clutter, no small details, no borders, no watermark."""
-    if reference_images:
+    if has_reference:
         prompt += ("\nIDENTITY: the person in the provided photo must appear as EXACTLY the same real person: "
                    "identical face shape, skin, eyes, glasses, facial hair, hairstyle and hair length, age and "
                    "body type. Photorealistic, like a photo of them; do not idealize, slim, rejuvenate or "
                    "stylize them. Expression may change slightly but must stay natural and true to their face.")
+    return prompt
 
+
+def _generate_one(client, concept, reference_images, out_path, burn_text):
+    """One image call for one concept; returns the saved path or raises.
+    ``reference_images`` are JPEG bytes. ``client`` None means the
+    OpenAI-compatible image endpoint."""
+    prompt = _image_prompt(concept, bool(reference_images), burn_text)
+
+    if client is None:
+        # /images/edits carries the references; a server without it answers
+        # 4xx with "no image" in the message and the caller retries without
+        # the person, same path as a Gemini refusal.
+        pil = Image.open(io.BytesIO(llm_backend.generate_image(prompt, references=reference_images)))
+        if burn_text:
+            pil = burn_thumbnail_text(pil, concept["text"], concept["text_position"], concept["text_color"])
+        return finalize_thumbnail(pil, out_path)
+
+    reference_parts = [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in reference_images]
     response = client.models.generate_content(
         model=IMAGE_MODEL,
-        contents=reference_images + [prompt],
+        contents=reference_parts + [prompt],
         config=types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"],
             image_config=types.ImageConfig(aspect_ratio="16:9", image_size="2K"),
@@ -660,24 +705,33 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
     person reference when the user picked a frame instead of uploading a photo.
     Returns [{"url", "text", "why"}] (only the ones that rendered).
     """
-    client = genai.Client(api_key=api_key)
+    text_client = _gemini_client(api_key)
+    # Images: the local endpoint when configured, else Gemini. A text-only
+    # local server with a Gemini key gets Gemini images; with neither, the
+    # endpoint has already refused the request (app.py).
+    if llm_backend.image_active():
+        image_client = None
+    elif api_key:
+        image_client = text_client or genai.Client(api_key=api_key)
+    else:
+        raise RuntimeError("No image model: set GEMINI_API_KEY or LLM_IMAGE_MODEL")
     output_dir = os.path.join("output", "thumbnails", session_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    # References travel as immutable byte parts: one PIL Image shared by the
+    # References travel as immutable bytes: one PIL Image shared by the
     # worker threads below raced inside the SDK's encoder and every call died.
     reference_images = []
     if face_image_path and os.path.exists(face_image_path):
-        reference_images.append(_image_part(face_image_path))
+        reference_images.append(_image_bytes(face_image_path))
     elif frame_reference and os.path.exists(frame_reference.get("path", "")):
         ref_path = os.path.join(output_dir, "person_reference.jpg")
         _crop_face_reference(frame_reference["path"], frame_reference.get("face"), ref_path)
-        reference_images.append(_image_part(ref_path))
+        reference_images.append(_image_bytes(ref_path))
     if bg_image_path and os.path.exists(bg_image_path):
-        reference_images.append(_image_part(bg_image_path))
+        reference_images.append(_image_bytes(bg_image_path))
 
     concepts = plan_thumbnail_concepts(
-        client, title, count, video_context=video_context, extra_prompt=extra_prompt,
+        text_client, title, count, video_context=video_context, extra_prompt=extra_prompt,
         thumbnail_text_hint=thumbnail_text_hint, has_person=bool(reference_images), language=language)
     for i, c in enumerate(concepts):
         print(f"🎨 [Thumbnail] Concept {i + 1}: \"{c['text']}\" ({c['text_position']}) - {c['why']}")
@@ -690,20 +744,21 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
         concept = concepts[i]
         try:
             try:
-                _generate_one(client, concept, reference_images, out_path, burn_text)
+                _generate_one(image_client, concept, reference_images, out_path, burn_text)
                 fallback = False
             except RuntimeError as e:
                 if "no image" not in str(e):
                     raise
                 # Gemini refuses recognisable public figures, by reference photo
-                # and by name alike (IMAGE_OTHER). Retry once with no reference
-                # and a generic presenter instead of failing the whole batch.
+                # and by name alike (IMAGE_OTHER), and a local server may have
+                # no /images/edits for the reference at all. Retry once with no
+                # reference and a generic presenter instead of failing the batch.
                 print(f"⚠️ [Thumbnail] Generation {i + 1} blocked ({e}); retrying without the person")
                 generic = dict(concept, scene=(
                     "Do not depict any real, named or recognisable person; if a presenter is needed, "
                     "show a generic one seen from behind or in silhouette, or use an object instead. "
                     + concept["scene"]))
-                _generate_one(client, generic, [], out_path, burn_text)
+                _generate_one(image_client, generic, [], out_path, burn_text)
                 fallback = True
             print(f"✅ [Thumbnail] Saved: {out_path}")
             return {"url": f"/thumbnails/{session_id}/{os.path.basename(out_path)}",
@@ -728,10 +783,10 @@ def generate_thumbnail(api_key, title, session_id, face_image_path=None, bg_imag
 
 def generate_youtube_description(api_key, title, transcript_segments, language, video_duration):
     """
-    Uses Gemini to generate a YouTube description with chapter markers from transcript segments.
+    Generates a YouTube description with chapter markers from transcript segments.
     Returns: { "description": "full description text with chapters" }
     """
-    client = genai.Client(api_key=api_key)
+    client = _gemini_client(api_key)
 
     # Format segments for the prompt
     formatted_segments = []
@@ -774,12 +829,7 @@ REQUIREMENTS:
 OUTPUT: Return ONLY the description text (no JSON wrapper, no markdown code blocks). The description should be ready to paste directly into YouTube."""
 
     print("🤖 [Thumbnail] Generating YouTube description with chapters...")
-    response = client.models.generate_content(
-        model=TEXT_MODEL,
-        contents=[prompt],
-    )
-
-    description = response.text.strip()
+    description = _ask_text(client, prompt)
     # Clean up any accidental markdown wrappers
     if description.startswith("```"):
         lines = description.split("\n")

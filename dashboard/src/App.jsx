@@ -1715,6 +1715,7 @@ function App() {
               uploadPostKey={uploadPostKey}
               uploadUserId={uploadUserId}
               managed={isManaged}
+              localLlm={localLlm}
               onCreateClips={(sessionId) => {
                 setActiveTab('dashboard');
                 // The Studio source is the user's own upload, published to their

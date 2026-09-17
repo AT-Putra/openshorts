@@ -19,6 +19,9 @@ def local(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "http://llm.test/v1")
     monkeypatch.setenv("LLM_MODEL", "qwen2.5:14b")
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    # A developer's .env (loaded by main.py) must not leak into the contract.
+    for var in ("LLM_API_KEY", "LLM_VISION_MODEL", "LLM_IMAGE_MODEL"):
+        monkeypatch.delenv(var, raising=False)
 
 
 def _serve(handler, monkeypatch):
@@ -47,7 +50,8 @@ def test_inactive_without_a_base_url(monkeypatch):
 def test_base_url_alone_activates_and_describes(local):
     assert llm_backend.active() is True
     assert llm_backend.describe() == {
-        "provider": "openai", "model": "qwen2.5:14b", "baseUrl": "http://llm.test/v1"}
+        "provider": "openai", "model": "qwen2.5:14b", "baseUrl": "http://llm.test/v1",
+        "visionModel": None, "imageModel": None}
 
 
 def test_explicit_gemini_provider_wins_over_base_url(local, monkeypatch):
